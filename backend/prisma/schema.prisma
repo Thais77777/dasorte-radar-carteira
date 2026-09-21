@@ -1,0 +1,385 @@
+// Dá Sorte Loterias — CRM de gestão de carteira de PDVs
+// Fonte oficial da classificação estratégica (Prioridade, Status de Retenção,
+// Maturidade, Valor, Segmento) é a base importada. O sistema NUNCA recalcula
+// esses campos — apenas armazena, exibe, filtra e ordena.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================
+// USUÁRIOS E PERMISSÕES
+// ============================================================
+
+enum RoleName {
+  ADMIN
+  GESTOR
+  SUPERVISOR
+  CS
+  ANALISTA_DADOS
+  ANALISTA_FINANCEIRO
+}
+
+model User {
+  id           String   @id @default(cuid())
+  name         String
+  email        String   @unique
+  passwordHash String
+  role         RoleName
+  active       Boolean  @default(true)
+  supervisorId String? // for CS users: their supervisor (self-relation)
+  supervisor   User?    @relation("SupervisorTeam", fields: [supervisorId], references: [id])
+  team         User[]   @relation("SupervisorTeam")
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  assignmentsAsOwner  PDVAssignment[]  @relation("Responsavel")
+  assignmentsAsBackup PDVAssignment[]  @relation("Backup")
+  tasksAssigned       Task[]           @relation("TaskResponsavel")
+  tasksCreated        Task[]           @relation("TaskCriadoPor")
+  contactAttempts     ContactAttempt[]
+  timelineEvents      TimelineEvent[]
+  importBatches       ImportBatch[]
+  notifications       Notification[]
+
+  @@index([supervisorId])
+  @@index([role])
+}
+
+// ============================================================
+// PDV — cadastro principal. Campos estratégicos são somente
+// importados (nunca calculados pelo backend).
+// ============================================================
+
+model PDV {
+  id        String @id @default(cuid())
+  codigoPdv String @unique // chave única — vem da coluna "PDV"
+  nome      String
+  cidade    String?
+  telefone  String? // sempre string, nunca numérico
+  canal     String?
+  modalidade String?
+
+  // campos textuais crus vindos da planilha (podem divergir do
+  // responsável de fato controlado pelo CRM em PDVAssignment)
+  supervisorPlanilha String?
+  consultorPlanilha  String?
+
+  statusVendas  String?
+  adimplencia   String?
+
+  // ---- CLASSIFICAÇÃO ESTRATÉGICA — SOMENTE IMPORTADA ----
+  maturidade      String?
+  statusRetencao  String?
+  valor           String?
+  prioridade      String?
+  segmento        String?
+
+  ultimaTransacao     DateTime?
+  diasSemTransacao    Int?
+
+  dataUltimaVendaRaspadinha   DateTime?
+  valorUltimaVendaRaspadinha  Decimal?  @db.Decimal(14, 2)
+  dataUltimaCompraRaspadinha  DateTime?
+  valorUltimaCompraRaspadinha Decimal?  @db.Decimal(14, 2)
+  dataUltimaVendaTrem         DateTime?
+  valorUltimaVendaTrem        Decimal?  @db.Decimal(14, 2)
+
+  estoque                Decimal? @db.Decimal(14, 2)
+  totalPacotesRaspadinha Decimal? @db.Decimal(14, 2)
+  totalVendasRaspadinha  Decimal? @db.Decimal(14, 2)
+
+  selloutTotal        Decimal? @db.Decimal(14, 2)
+  selloutMedioMensal   Decimal? @db.Decimal(14, 2)
+
+  dataAtivacao      DateTime?
+  mesesDeBase       Decimal?  @db.Decimal(10, 2)
+  diasComMovimento  Int?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  assignments      PDVAssignment[]
+  contactability    Contactability?
+  contactAttempts   ContactAttempt[]
+  tasks             Task[]
+  timelineEvents    TimelineEvent[]
+  importChanges     ImportChange[]
+  performanceSnapshots PerformanceSnapshot[]
+
+  @@index([cidade])
+  @@index([statusRetencao])
+  @@index([prioridade])
+  @@index([valor])
+  @@index([maturidade])
+  @@index([segmento])
+  @@index([supervisorPlanilha])
+  @@index([consultorPlanilha])
+  @@index([ultimaTransacao])
+  @@index([diasSemTransacao])
+  @@index([canal])
+  @@index([adimplencia])
+}
+
+// Controle próprio de responsabilidade (não depende apenas da planilha)
+model PDVAssignment {
+  id             String    @id @default(cuid())
+  pdvId          String
+  pdv            PDV       @relation(fields: [pdvId], references: [id], onDelete: Cascade)
+  responsavelId  String?
+  responsavel    User?     @relation("Responsavel", fields: [responsavelId], references: [id])
+  backupId       String?
+  backup         User?     @relation("Backup", fields: [backupId], references: [id])
+  inicioVigencia DateTime  @default(now())
+  fimVigencia    DateTime?
+  ativo          Boolean   @default(true)
+  createdAt      DateTime  @default(now())
+
+  @@index([pdvId, ativo])
+  @@index([responsavelId, ativo])
+  @@index([backupId, ativo])
+}
+
+// ============================================================
+// CONTACTABILIDADE — dimensão operacional, separada da
+// classificação estratégica.
+// ============================================================
+
+enum ContactabilidadeStatus {
+  SEM_TELEFONE
+  NUNCA_CONTATADO
+  AGUARDANDO_RESPOSTA
+  SEM_RESPOSTA
+  CONTATO_REALIZADO
+  CONTATO_RECUPERADO
+  CONTATO_INVALIDO
+  ESCALAR_CONTATO
+}
+
+model Contactability {
+  id               String                  @id @default(cuid())
+  pdvId            String                  @unique
+  pdv              PDV                     @relation(fields: [pdvId], references: [id], onDelete: Cascade)
+  status           ContactabilidadeStatus  @default(NUNCA_CONTATADO)
+  ultimoContato    DateTime?
+  numeroTentativas Int                     @default(0)
+  ultimoCanal      String?
+  ultimoResultado  String?
+  proximaAcao      String?
+  proximaAcaoData  DateTime?
+  updatedAt        DateTime                @updatedAt
+
+  @@index([status])
+}
+
+enum CanalContato {
+  LIGACAO
+  WHATSAPP
+  EMAIL
+  VISITA
+  OUTRO
+}
+
+enum ResultadoContato {
+  CONTATO_REALIZADO
+  SEM_RESPOSTA
+  NUMERO_INVALIDO
+  WHATSAPP_NAO_ENTREGUE
+  RETORNO_SOLICITADO
+  CONTATO_RECUPERADO
+}
+
+model ContactAttempt {
+  id              String            @id @default(cuid())
+  pdvId           String
+  pdv             PDV               @relation(fields: [pdvId], references: [id], onDelete: Cascade)
+  usuarioId       String
+  usuario         User              @relation(fields: [usuarioId], references: [id])
+  canal           CanalContato
+  resultado       ResultadoContato
+  observacao      String?
+  proximaAcao     String?
+  proximaAcaoData DateTime?
+  createdAt       DateTime          @default(now())
+
+  @@index([pdvId])
+  @@index([usuarioId])
+}
+
+// ============================================================
+// TAREFAS
+// ============================================================
+
+enum TaskStatus {
+  PENDENTE
+  EM_ANDAMENTO
+  CONCLUIDA
+  CANCELADA
+}
+
+enum TaskTipo {
+  LIGACAO
+  WHATSAPP
+  EMAIL
+  VISITA
+  TREINAMENTO
+  CAMPANHA
+  OUTRO
+}
+
+model Task {
+  id            String     @id @default(cuid())
+  pdvId         String
+  pdv           PDV        @relation(fields: [pdvId], references: [id], onDelete: Cascade)
+  responsavelId String
+  responsavel   User       @relation("TaskResponsavel", fields: [responsavelId], references: [id])
+  criadoPorId   String
+  criadoPor     User       @relation("TaskCriadoPor", fields: [criadoPorId], references: [id])
+  titulo        String
+  descricao     String?
+  tipo          TaskTipo   @default(OUTRO)
+  prioridadeOperacional String?
+  prazo         DateTime?
+  status        TaskStatus @default(PENDENTE)
+  createdAt     DateTime   @default(now())
+  completedAt   DateTime?
+
+  @@index([pdvId])
+  @@index([responsavelId, status])
+  @@index([prazo])
+  @@index([status])
+}
+
+// ============================================================
+// TIMELINE — histórico cronológico de tudo que acontece no PDV
+// ============================================================
+
+enum TimelineEventType {
+  IMPORTACAO
+  ATUALIZACAO_CADASTRAL
+  CLASSIFICACAO_ALTERADA
+  CONTATO_REGISTRADO
+  TAREFA_CRIADA
+  TAREFA_CONCLUIDA
+  TAREFA_CANCELADA
+  RESPONSAVEL_ALTERADO
+  OBSERVACAO
+}
+
+model TimelineEvent {
+  id          String            @id @default(cuid())
+  pdvId       String
+  pdv         PDV               @relation(fields: [pdvId], references: [id], onDelete: Cascade)
+  usuarioId   String?
+  usuario     User?             @relation(fields: [usuarioId], references: [id])
+  tipo        TimelineEventType
+  descricao   String
+  metadata    Json?
+  createdAt   DateTime          @default(now())
+
+  @@index([pdvId, createdAt])
+}
+
+// ============================================================
+// IMPORTAÇÃO DE BASE
+// ============================================================
+
+model ImportBatch {
+  id                String   @id @default(cuid())
+  usuarioId         String
+  usuario           User     @relation(fields: [usuarioId], references: [id])
+  arquivo           String
+  totalLinhas       Int
+  novosRegistros    Int
+  atualizados       Int
+  duplicados        Int
+  invalidos         Int
+  erros             Json?
+  columnMapping     Json?
+  createdAt         DateTime @default(now())
+
+  changes             ImportChange[]
+  performanceSnapshots PerformanceSnapshot[]
+
+  @@index([createdAt])
+}
+
+model ImportChange {
+  id            String      @id @default(cuid())
+  importBatchId String
+  importBatch   ImportBatch @relation(fields: [importBatchId], references: [id], onDelete: Cascade)
+  pdvId         String
+  pdv           PDV         @relation(fields: [pdvId], references: [id], onDelete: Cascade)
+  campo         String
+  valorAnterior String?
+  valorNovo     String?
+  createdAt     DateTime    @default(now())
+
+  @@index([importBatchId])
+  @@index([pdvId])
+}
+
+// snapshot histórico para permitir evolução de sellout/status/etc.
+model PerformanceSnapshot {
+  id                 String      @id @default(cuid())
+  pdvId              String
+  pdv                PDV         @relation(fields: [pdvId], references: [id], onDelete: Cascade)
+  importBatchId      String?
+  importBatch        ImportBatch? @relation(fields: [importBatchId], references: [id])
+  dataSnapshot        DateTime    @default(now())
+  selloutTotal        Decimal?    @db.Decimal(14, 2)
+  selloutMedioMensal  Decimal?    @db.Decimal(14, 2)
+  estoque             Decimal?    @db.Decimal(14, 2)
+  diasSemTransacao    Int?
+  statusRetencao      String?
+  prioridade          String?
+  valor               String?
+  maturidade           String?
+
+  @@index([pdvId, dataSnapshot])
+}
+
+// ============================================================
+// NOTIFICAÇÕES / ALERTAS
+// ============================================================
+
+enum NotificationTipo {
+  PRIORIDADE_CRITICA
+  PRIORIDADE_ALTA
+  STATUS_RISCO
+  STATUS_CHURN
+  SEM_TELEFONE
+  SEM_CONTATO
+  TAREFA_VENCIDA
+  SELLOUT_BAIXO
+  INADIMPLENCIA
+  ESTOQUE_ELEVADO
+}
+
+model Notification {
+  id        String           @id @default(cuid())
+  usuarioId String
+  usuario   User             @relation(fields: [usuarioId], references: [id])
+  tipo      NotificationTipo
+  titulo    String
+  mensagem  String
+  lida      Boolean          @default(false)
+  pdvId     String?
+  createdAt DateTime         @default(now())
+
+  @@index([usuarioId, lida])
+}
+
+// ============================================================
+// CONFIGURAÇÃO — régua de contactabilidade configurável
+// ============================================================
+
+model AppConfig {
+  key   String @id
+  value Json
+}
