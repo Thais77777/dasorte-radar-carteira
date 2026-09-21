@@ -1,0 +1,36 @@
+databases:
+  - name: dasorte-crm-db
+    databaseName: dasorte_crm
+    user: dasorte
+    plan: starter
+    region: oregon
+
+services:
+  - type: web
+    name: dasorte-crm
+    runtime: node
+    plan: starter
+    region: oregon
+    buildCommand: >
+      cd backend && npm install && npx prisma generate && npm run build &&
+      cd ../frontend && npm install && npm run build &&
+      mkdir -p ../backend/public && cp -r dist/. ../backend/public/
+    startCommand: cd backend && npx prisma migrate deploy && node dist/index.js
+    healthCheckPath: /api/health
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: dasorte-crm-db
+          property: connectionString
+      - key: JWT_SECRET
+        generateValue: true
+      - key: JWT_EXPIRES_IN
+        value: 8h
+      - key: NODE_ENV
+        value: production
+      - key: NPM_CONFIG_PRODUCTION
+        value: "false" # garante que devDependencies (typescript, prisma, vite...) sejam instaladas no build mesmo com NODE_ENV=production
+      - key: APP_URL
+        sync: false
+      - key: PORT
+        value: 4000
